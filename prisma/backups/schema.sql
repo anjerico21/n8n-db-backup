@@ -49,7 +49,9 @@ CREATE OR REPLACE FUNCTION "public"."increment_workflow_version"() RETURNS "trig
     LANGUAGE "plpgsql"
     AS $$
 			BEGIN
-				IF NEW."versionCounter" IS NOT DISTINCT FROM OLD."versionCounter" THEN
+				IF NEW."versionCounter" IS NOT DISTINCT FROM OLD."versionCounter"
+					AND (NEW."nodes"::text IS DISTINCT FROM OLD."nodes"::text
+						OR NEW."settings"::text IS DISTINCT FROM OLD."settings"::text) THEN
 					NEW."versionCounter" = OLD."versionCounter" + 1;
 				END IF;
 				RETURN NEW;
@@ -62,6 +64,512 @@ ALTER FUNCTION "public"."increment_workflow_version"() OWNER TO "postgres";
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_checkpoints" (
+    "runId" character varying(255) NOT NULL,
+    "agentId" character varying(255),
+    "state" "text",
+    "expired" boolean DEFAULT false NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agent_checkpoints" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_execution" (
+    "id" character varying(36) NOT NULL,
+    "threadId" character varying(36) NOT NULL,
+    "status" character varying(16) NOT NULL,
+    "startedAt" timestamp(3) with time zone,
+    "stoppedAt" timestamp(3) with time zone,
+    "duration" integer DEFAULT 0 NOT NULL,
+    "userMessage" "text" NOT NULL,
+    "assistantResponse" "text" NOT NULL,
+    "model" character varying(255),
+    "promptTokens" integer,
+    "completionTokens" integer,
+    "totalTokens" integer,
+    "cost" double precision,
+    "toolCalls" json,
+    "timeline" json,
+    "error" "text",
+    "hitlStatus" character varying(16),
+    "source" character varying(32),
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_agent_execution_hitlStatus" CHECK ((("hitlStatus")::"text" = ANY ((ARRAY['suspended'::character varying, 'resumed'::character varying])::"text"[]))),
+    CONSTRAINT "CHK_agent_execution_status" CHECK ((("status")::"text" = ANY ((ARRAY['success'::character varying, 'error'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."agent_execution" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_execution_threads" (
+    "id" character varying(36) NOT NULL,
+    "agentId" character varying(36) NOT NULL,
+    "agentName" character varying(255) NOT NULL,
+    "projectId" character varying(255) NOT NULL,
+    "sessionNumber" integer DEFAULT 0 NOT NULL,
+    "totalPromptTokens" integer DEFAULT 0 NOT NULL,
+    "totalCompletionTokens" integer DEFAULT 0 NOT NULL,
+    "totalCost" double precision DEFAULT 0 NOT NULL,
+    "totalDuration" integer DEFAULT 0 NOT NULL,
+    "title" character varying(255),
+    "emoji" character varying(8),
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "taskId" character varying(32),
+    "taskVersionId" character varying(36)
+);
+
+
+ALTER TABLE "public"."agent_execution_threads" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agent_execution_threads"."taskId" IS 'Published task ID that triggered this session; not an FK because published runs can outlive draft task definition rows';
+
+
+
+COMMENT ON COLUMN "public"."agent_execution_threads"."taskVersionId" IS 'Published agent_history version that supplied the task snapshot';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_files" (
+    "id" character varying(16) NOT NULL,
+    "agentId" character varying(36) NOT NULL,
+    "binaryDataId" "text" NOT NULL,
+    "fileName" character varying(255) NOT NULL,
+    "mimeType" character varying(255) NOT NULL,
+    "fileSizeBytes" integer NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agent_files" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agent_files"."id" IS 'Application-generated n8n nano ID';
+
+
+
+COMMENT ON COLUMN "public"."agent_files"."agentId" IS 'Agent that owns this uploaded file';
+
+
+
+COMMENT ON COLUMN "public"."agent_files"."binaryDataId" IS 'Opaque BinaryDataService reference (mode-prefixed, e.g. "filesystem-v2:<uuid>"); not an FK to binary_data, which only has rows in DB storage mode';
+
+
+
+COMMENT ON COLUMN "public"."agent_files"."fileSizeBytes" IS 'Uploaded file size in bytes';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_history" (
+    "versionId" character varying(36) NOT NULL,
+    "agentId" character varying(36) NOT NULL,
+    "schema" json,
+    "tools" json,
+    "skills" json,
+    "publishedById" "uuid",
+    "author" character varying(255) NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agent_history" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agent_history"."schema" IS 'Frozen snapshot of the published AgentJsonConfig';
+
+
+
+COMMENT ON COLUMN "public"."agent_history"."tools" IS 'Frozen map of `toolId → { code, descriptor }` at publish time';
+
+
+
+COMMENT ON COLUMN "public"."agent_history"."skills" IS 'Frozen map of `skillId → AgentSkill` at publish time';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_task_definition" (
+    "id" character varying(32) NOT NULL,
+    "agentId" character varying(36) NOT NULL,
+    "name" character varying(128) NOT NULL,
+    "objective" "text" NOT NULL,
+    "cronExpression" character varying(128) NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agent_task_definition" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agent_task_definition"."id" IS 'Application-generated task ID referenced from agent JSON config';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_definition"."agentId" IS 'Owning agent; task definitions are deleted when the agent is deleted';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_definition"."objective" IS 'User-authored instruction sent to the agent when this task runs';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_definition"."cronExpression" IS 'Cron schedule evaluated using the instance timezone';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_task_run_lock" (
+    "agentId" character varying(36) NOT NULL,
+    "taskId" character varying(32) NOT NULL,
+    "holderId" "uuid" NOT NULL,
+    "heldUntil" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agent_task_run_lock" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agent_task_run_lock"."agentId" IS 'Published agent whose scheduled task run is locked';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_run_lock"."taskId" IS 'Published task ID whose scheduled run is locked';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_run_lock"."holderId" IS 'Ephemeral lock owner token generated by the running main';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_run_lock"."heldUntil" IS 'Time after which another main can claim this task run lock';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agent_task_snapshot" (
+    "versionId" character varying(36) NOT NULL,
+    "taskId" character varying(32) NOT NULL,
+    "enabled" boolean NOT NULL,
+    "name" character varying(128) NOT NULL,
+    "objective" "text" NOT NULL,
+    "cronExpression" character varying(128) NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agent_task_snapshot" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agent_task_snapshot"."versionId" IS 'Published agent_history version this task snapshot belongs to';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_snapshot"."taskId" IS 'Stable task ID referenced from the published agent JSON config';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_snapshot"."enabled" IS 'Published enabled state for this task at publish time';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_snapshot"."objective" IS 'User-authored instruction sent to the agent when this task runs';
+
+
+
+COMMENT ON COLUMN "public"."agent_task_snapshot"."cronExpression" IS 'Cron schedule evaluated using the instance timezone';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents" (
+    "id" character varying(36) NOT NULL,
+    "name" character varying(128) NOT NULL,
+    "description" character varying(512),
+    "projectId" character varying(255) NOT NULL,
+    "integrations" json DEFAULT '[]'::json NOT NULL,
+    "schema" json,
+    "tools" json DEFAULT '{}'::json NOT NULL,
+    "skills" json DEFAULT '{}'::json NOT NULL,
+    "versionId" character varying(36),
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "activeVersionId" character varying(36)
+);
+
+
+ALTER TABLE "public"."agents" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_memory_entries" (
+    "id" character varying(36) NOT NULL,
+    "agentId" character varying(36) NOT NULL,
+    "resourceId" character varying(255) NOT NULL,
+    "content" "text" NOT NULL,
+    "contentHash" character varying(64) NOT NULL,
+    "status" character varying(16) NOT NULL,
+    "supersededBy" character varying(36),
+    "embeddingModel" character varying(128),
+    "embedding" json,
+    "metadata" json,
+    "lastSeenAt" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_agents_memory_entries_status" CHECK ((("status")::"text" = ANY ((ARRAY['active'::character varying, 'superseded'::character varying, 'dropped'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."agents_memory_entries" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agents_memory_entries"."agentId" IS 'Agent that owns this episodic memory entry';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entries"."resourceId" IS 'agents_resources.id partition used for episodic recall scope';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entries"."supersededBy" IS 'Self-reference to replacement memory entry';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entries"."embeddingModel" IS 'Embedding model used to produce embedding';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entries"."embedding" IS 'Embedding vector for episodic recall';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entries"."metadata" IS 'Optional system metadata for ranking and debugging';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entries"."lastSeenAt" IS 'Last time equivalent content was observed; updatedAt tracks row mutation time';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_memory_entry_cursors" (
+    "agentId" character varying(36) NOT NULL,
+    "observationScopeId" character varying(255) NOT NULL,
+    "lastIndexedObservationId" character varying(36) NOT NULL,
+    "lastIndexedObservationCreatedAt" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agents_memory_entry_cursors" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_cursors"."agentId" IS 'Agent that owns this cursor';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_cursors"."observationScopeId" IS 'agents_threads.id source stream indexed into episodic memory';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_cursors"."lastIndexedObservationId" IS 'Last observation-log row indexed into episodic memory';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_cursors"."lastIndexedObservationCreatedAt" IS 'Creation timestamp for the last indexed observation-log row';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_memory_entry_locks" (
+    "agentId" character varying(36) NOT NULL,
+    "resourceId" character varying(255) NOT NULL,
+    "holderId" character varying(64) NOT NULL,
+    "heldUntil" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agents_memory_entry_locks" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_locks"."agentId" IS 'Agent that owns this lock';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_locks"."resourceId" IS 'agents_resources.id partition locked for episodic indexing';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_locks"."holderId" IS 'Ephemeral background-task lock owner token';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_memory_entry_sources" (
+    "id" character varying(36) NOT NULL,
+    "agentId" character varying(36) NOT NULL,
+    "memoryEntryId" character varying(36) NOT NULL,
+    "observationId" character varying(36) NOT NULL,
+    "threadId" character varying(255) NOT NULL,
+    "evidenceHash" character varying(64) NOT NULL,
+    "evidenceText" "text" NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agents_memory_entry_sources" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_sources"."agentId" IS 'Agent that owns the linked episodic memory entry source';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_sources"."memoryEntryId" IS 'Episodic memory entry linked to this source evidence';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_sources"."observationId" IS 'Observation-log row used as source evidence';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_sources"."threadId" IS 'Source conversation thread that produced the linked observation';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_sources"."evidenceHash" IS 'Bounded hash used to deduplicate exact evidence links';
+
+
+
+COMMENT ON COLUMN "public"."agents_memory_entry_sources"."evidenceText" IS 'Exact source evidence text from the observation, not recall scope';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_messages" (
+    "id" character varying(36) NOT NULL,
+    "threadId" character varying(255) NOT NULL,
+    "resourceId" character varying(255) NOT NULL,
+    "role" character varying(36) NOT NULL,
+    "type" character varying(36),
+    "content" json NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agents_messages" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_observation_cursors" (
+    "agentId" character varying(36) NOT NULL,
+    "observationScopeId" character varying(255) NOT NULL,
+    "lastObservedMessageId" character varying(36) NOT NULL,
+    "lastObservedAt" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agents_observation_cursors" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agents_observation_cursors"."agentId" IS 'Agent that owns this cursor';
+
+
+
+COMMENT ON COLUMN "public"."agents_observation_cursors"."observationScopeId" IS 'agents_threads.id source stream checkpointed by this cursor';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_observation_locks" (
+    "agentId" character varying(36) NOT NULL,
+    "observationScopeId" character varying(255) NOT NULL,
+    "taskKind" character varying(20) NOT NULL,
+    "holderId" character varying(64) NOT NULL,
+    "heldUntil" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_agents_observation_locks_taskKind" CHECK ((("taskKind")::"text" = ANY ((ARRAY['observer'::character varying, 'reflector'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."agents_observation_locks" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agents_observation_locks"."agentId" IS 'Agent that owns this lock';
+
+
+
+COMMENT ON COLUMN "public"."agents_observation_locks"."observationScopeId" IS 'agents_threads.id source stream locked for observation tasks';
+
+
+
+COMMENT ON COLUMN "public"."agents_observation_locks"."holderId" IS 'Ephemeral background-task lock owner token, not a user ID';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_observations" (
+    "id" character varying(36) NOT NULL,
+    "agentId" character varying(36) NOT NULL,
+    "observationScopeId" character varying(255) NOT NULL,
+    "marker" character varying(16) NOT NULL,
+    "text" "text" NOT NULL,
+    "parentId" character varying(36),
+    "tokenCount" integer DEFAULT 0 NOT NULL,
+    "status" character varying(16) NOT NULL,
+    "supersededBy" character varying(36),
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_agents_observations_marker" CHECK ((("marker")::"text" = ANY ((ARRAY['critical'::character varying, 'important'::character varying, 'info'::character varying, 'completion'::character varying])::"text"[]))),
+    CONSTRAINT "CHK_agents_observations_status" CHECK ((("status")::"text" = ANY ((ARRAY['active'::character varying, 'superseded'::character varying, 'dropped'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."agents_observations" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."agents_observations"."id" IS 'Application-generated n8n string ID, not a database UUID';
+
+
+
+COMMENT ON COLUMN "public"."agents_observations"."agentId" IS 'Agent that owns this observation row';
+
+
+
+COMMENT ON COLUMN "public"."agents_observations"."observationScopeId" IS 'agents_threads.id source stream for this observation log';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_resources" (
+    "id" character varying(255) NOT NULL,
+    "metadata" "text",
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agents_resources" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."agents_threads" (
+    "id" character varying(36) NOT NULL,
+    "resourceId" character varying(255) NOT NULL,
+    "title" character varying(255),
+    "metadata" "text",
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."agents_threads" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."ai_builder_temporary_workflow" (
@@ -142,7 +650,7 @@ CREATE TABLE IF NOT EXISTS "public"."binary_data" (
     "fileSize" integer NOT NULL,
     "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
-    CONSTRAINT "CHK_binary_data_sourceType" CHECK ((("sourceType")::"text" = ANY ((ARRAY['execution'::character varying, 'chat_message_attachment'::character varying])::"text"[])))
+    CONSTRAINT "CHK_binary_data_sourceType" CHECK ((("sourceType")::"text" = ANY ((ARRAY['execution'::character varying, 'chat_message_attachment'::character varying, 'agent_file'::character varying])::"text"[])))
 );
 
 
@@ -444,6 +952,41 @@ CREATE TABLE IF NOT EXISTS "public"."dynamic_credential_user_entry" (
 ALTER TABLE "public"."dynamic_credential_user_entry" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."evaluation_collection" (
+    "id" character varying(36) NOT NULL,
+    "name" character varying(128) NOT NULL,
+    "description" "text",
+    "workflowId" character varying(36) NOT NULL,
+    "evaluationConfigId" character varying(36) NOT NULL,
+    "createdById" "uuid",
+    "insightsCache" json,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."evaluation_collection" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."evaluation_config" (
+    "id" character varying(36) NOT NULL,
+    "workflowId" character varying(36) NOT NULL,
+    "name" character varying(128) NOT NULL,
+    "status" character varying(16) DEFAULT 'valid'::character varying NOT NULL,
+    "invalidReason" character varying(64),
+    "datasetSource" character varying(32) NOT NULL,
+    "datasetRef" json NOT NULL,
+    "startNodeName" character varying(255) NOT NULL,
+    "endNodeName" character varying(255) NOT NULL,
+    "metrics" json NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."evaluation_config" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."event_destinations" (
     "id" "uuid" NOT NULL,
     "destination" "jsonb" NOT NULL,
@@ -698,6 +1241,46 @@ CREATE TABLE IF NOT EXISTS "public"."installed_packages" (
 ALTER TABLE "public"."installed_packages" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."instance_ai_checkpoints" (
+    "key" character varying(255) NOT NULL,
+    "runId" character varying(255),
+    "threadId" "uuid" NOT NULL,
+    "resourceId" character varying(255),
+    "state" json,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "expiredAt" timestamp(3) with time zone,
+    CONSTRAINT "instance_ai_checkpoints_state_tombstone_check" CHECK (((("expiredAt" IS NOT NULL) AND ("state" IS NULL)) OR ("expiredAt" IS NULL)))
+);
+
+
+ALTER TABLE "public"."instance_ai_checkpoints" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."instance_ai_checkpoints"."key" IS 'Opaque checkpoint key from the agent runtime.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_checkpoints"."runId" IS 'Run ID parsed from the checkpoint key when available.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_checkpoints"."threadId" IS 'Instance AI thread that owns the checkpoint.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_checkpoints"."resourceId" IS 'Resource ID recorded by the agent runtime.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_checkpoints"."state" IS 'Serializable agent state snapshot stored as JSON.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_checkpoints"."expiredAt" IS 'Soft-delete timestamp: null means live; non-null marks the row as a tombstone.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."instance_ai_iteration_logs" (
     "id" character varying(36) NOT NULL,
     "threadId" "uuid" NOT NULL,
@@ -724,6 +1307,44 @@ CREATE TABLE IF NOT EXISTS "public"."instance_ai_messages" (
 
 
 ALTER TABLE "public"."instance_ai_messages" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."instance_ai_observation_cursors" (
+    "observationScopeId" "uuid" NOT NULL,
+    "lastObservedMessageId" character varying(36) NOT NULL,
+    "lastObservedAt" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL
+);
+
+
+ALTER TABLE "public"."instance_ai_observation_cursors" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."instance_ai_observation_cursors"."observationScopeId" IS 'instance_ai_threads.id source stream checkpointed by this cursor';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."instance_ai_observation_locks" (
+    "observationScopeId" "uuid" NOT NULL,
+    "taskKind" character varying(20) NOT NULL,
+    "holderId" character varying(64) NOT NULL,
+    "heldUntil" timestamp(3) with time zone NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_instance_ai_observation_locks_taskKind" CHECK ((("taskKind")::"text" = ANY ((ARRAY['observer'::character varying, 'reflector'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."instance_ai_observation_locks" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."instance_ai_observation_locks"."observationScopeId" IS 'instance_ai_threads.id source stream locked for observation tasks';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_observation_locks"."holderId" IS 'Ephemeral background-task lock owner token, not a user ID';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."instance_ai_observational_memory" (
@@ -765,6 +1386,93 @@ CREATE TABLE IF NOT EXISTS "public"."instance_ai_observational_memory" (
 ALTER TABLE "public"."instance_ai_observational_memory" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."instance_ai_observations" (
+    "id" character varying(36) NOT NULL,
+    "observationScopeId" "uuid" NOT NULL,
+    "marker" character varying(16) NOT NULL,
+    "text" "text" NOT NULL,
+    "parentId" character varying(36),
+    "tokenCount" integer DEFAULT 0 NOT NULL,
+    "status" character varying(16) NOT NULL,
+    "supersededBy" character varying(36),
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_instance_ai_observations_marker" CHECK ((("marker")::"text" = ANY ((ARRAY['critical'::character varying, 'important'::character varying, 'info'::character varying, 'completion'::character varying])::"text"[]))),
+    CONSTRAINT "CHK_instance_ai_observations_status" CHECK ((("status")::"text" = ANY ((ARRAY['active'::character varying, 'superseded'::character varying, 'dropped'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."instance_ai_observations" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."instance_ai_observations"."id" IS 'Application-generated n8n string ID, not a database UUID';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_observations"."observationScopeId" IS 'instance_ai_threads.id source stream for this observation log';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."instance_ai_pending_confirmations" (
+    "requestId" character varying(36) NOT NULL,
+    "threadId" "uuid" NOT NULL,
+    "userId" "uuid" NOT NULL,
+    "kind" character varying(16) NOT NULL,
+    "runId" character varying(36) NOT NULL,
+    "toolCallId" character varying(64),
+    "messageGroupId" character varying(36),
+    "checkpointKey" character varying(255),
+    "checkpointTaskId" character varying(36),
+    "expiresAt" timestamp(3) with time zone,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_instance_ai_pending_confirmations_kind" CHECK ((("kind")::"text" = ANY ((ARRAY['suspended'::character varying, 'inline'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."instance_ai_pending_confirmations" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."requestId" IS 'HITL confirmation request identifier.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."threadId" IS 'Instance AI thread that owns the confirmation.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."userId" IS 'User who is expected to confirm or cancel.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."kind" IS '''suspended'' (resumable from checkpoint) or ''inline'' (orchestrator-held Promise).';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."runId" IS 'External run ID; reused on resume for SSE correlation.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."toolCallId" IS 'Suspended tool call awaiting confirmation.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."messageGroupId" IS 'SSE event correlation group.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."checkpointKey" IS 'FK to instance_ai_checkpoints.key; also the SDK runId used to resume.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."checkpointTaskId" IS 'Set when the suspended run was a planned-task checkpoint follow-up.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_pending_confirmations"."expiresAt" IS 'TTL for the leader-only sweep; null disables auto-expiry.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."instance_ai_resources" (
     "id" character varying(255) NOT NULL,
     "workingMemory" "text",
@@ -786,7 +1494,9 @@ CREATE TABLE IF NOT EXISTS "public"."instance_ai_run_snapshots" (
     "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "langsmithRunId" character varying(36),
-    "langsmithTraceId" character varying(36)
+    "langsmithTraceId" character varying(36),
+    "traceId" character varying(64),
+    "spanId" character varying(64)
 );
 
 
@@ -798,6 +1508,14 @@ COMMENT ON COLUMN "public"."instance_ai_run_snapshots"."langsmithRunId" IS 'Lang
 
 
 COMMENT ON COLUMN "public"."instance_ai_run_snapshots"."langsmithTraceId" IS 'LangSmith trace ID (UUID v4, e.g. "f47ac10b-58cc-4372-a567-0e02b2c3d479").';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_run_snapshots"."traceId" IS 'OpenTelemetry trace ID for the root Instance AI run.';
+
+
+
+COMMENT ON COLUMN "public"."instance_ai_run_snapshots"."spanId" IS 'OpenTelemetry span ID for the root Instance AI run.';
 
 
 
@@ -863,6 +1581,29 @@ CREATE TABLE IF NOT EXISTS "public"."invalid_auth_token" (
 
 
 ALTER TABLE "public"."invalid_auth_token" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."mcp_registry_server" (
+    "slug" character varying(255) NOT NULL,
+    "status" character varying(50) NOT NULL,
+    "version" character varying(50) NOT NULL,
+    "registryUpdatedAt" timestamp(3) without time zone NOT NULL,
+    "data" json DEFAULT '{}'::json NOT NULL,
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_tmp_mcp_registry_server_status" CHECK ((("status")::"text" = ANY ((ARRAY['active'::character varying, 'deprecated'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."mcp_registry_server" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."mcp_registry_server"."status" IS 'Server status in the MCP registry. Deprecated servers are not surfaced to users.';
+
+
+
+COMMENT ON COLUMN "public"."mcp_registry_server"."data" IS 'JSON object containing server metadata (icons, remotes, tools, etc.)';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."migrations" (
@@ -1006,7 +1747,8 @@ CREATE TABLE IF NOT EXISTS "public"."project" (
     "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "icon" json,
     "description" character varying(512),
-    "creatorId" "uuid"
+    "creatorId" "uuid",
+    "customTelemetryTags" json DEFAULT '[]'::json NOT NULL
 );
 
 
@@ -1221,7 +1963,8 @@ CREATE TABLE IF NOT EXISTS "public"."test_case_execution" (
     "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "inputs" json,
-    "outputs" json
+    "outputs" json,
+    "runIndex" integer
 );
 
 
@@ -1240,7 +1983,11 @@ CREATE TABLE IF NOT EXISTS "public"."test_run" (
     "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "runningInstanceId" character varying(255),
-    "cancelRequested" boolean DEFAULT false NOT NULL
+    "cancelRequested" boolean DEFAULT false NOT NULL,
+    "workflowVersionId" character varying(36),
+    "evaluationConfigId" character varying(36),
+    "evaluationConfigSnapshot" "jsonb",
+    "collectionId" character varying(36)
 );
 
 
@@ -1313,7 +2060,8 @@ CREATE TABLE IF NOT EXISTS "public"."user_api_keys" (
     "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
     "scopes" json,
-    "audience" character varying DEFAULT 'public-api'::character varying NOT NULL
+    "audience" character varying DEFAULT 'public-api'::character varying NOT NULL,
+    "lastUsedAt" timestamp(3) with time zone
 );
 
 
@@ -1453,7 +2201,9 @@ CREATE TABLE IF NOT EXISTS "public"."workflow_entity" (
     "isArchived" boolean DEFAULT false NOT NULL,
     "versionCounter" integer DEFAULT 1 NOT NULL,
     "description" "text",
-    "activeVersionId" character varying(36)
+    "activeVersionId" character varying(36),
+    "nodeGroups" json DEFAULT '[]'::json NOT NULL,
+    "sourceWorkflowId" character varying
 );
 
 
@@ -1470,11 +2220,50 @@ CREATE TABLE IF NOT EXISTS "public"."workflow_history" (
     "connections" json NOT NULL,
     "name" character varying(128),
     "autosaved" boolean DEFAULT false NOT NULL,
-    "description" "text"
+    "description" "text",
+    "nodeGroups" json DEFAULT '[]'::json NOT NULL
 );
 
 
 ALTER TABLE "public"."workflow_history" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."workflow_publication_outbox" (
+    "id" integer NOT NULL,
+    "workflowId" character varying(36) NOT NULL,
+    "publishedVersionId" character varying(36) NOT NULL,
+    "status" character varying(20) NOT NULL,
+    "errorMessage" "text",
+    "createdAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    "updatedAt" timestamp(3) with time zone DEFAULT CURRENT_TIMESTAMP(3) NOT NULL,
+    CONSTRAINT "CHK_workflow_publication_outbox_status" CHECK ((("status")::"text" = ANY ((ARRAY['pending'::character varying, 'in_progress'::character varying, 'completed'::character varying, 'partial_success'::character varying, 'failed'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."workflow_publication_outbox" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."workflow_publication_outbox"."workflowId" IS 'References workflow_entity.id.';
+
+
+
+COMMENT ON COLUMN "public"."workflow_publication_outbox"."publishedVersionId" IS 'References workflow_history.versionId.';
+
+
+
+COMMENT ON COLUMN "public"."workflow_publication_outbox"."errorMessage" IS 'Error details for surfacing failed publications to the user.';
+
+
+
+ALTER TABLE "public"."workflow_publication_outbox" ALTER COLUMN "id" ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME "public"."workflow_publication_outbox_id_seq"
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."workflow_publish_history" (
@@ -1604,8 +2393,18 @@ ALTER TABLE ONLY "public"."instance_ai_run_snapshots"
 
 
 
+ALTER TABLE ONLY "public"."mcp_registry_server"
+    ADD CONSTRAINT "PK_12fd89a1fb8489513b0a91f5d31" PRIMARY KEY ("slug");
+
+
+
 ALTER TABLE ONLY "public"."instance_ai_messages"
     ADD CONSTRAINT "PK_156c6f287225e9befe0181bb02b" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agent_task_definition"
+    ADD CONSTRAINT "PK_1756c11c637903e97629a7a784a" PRIMARY KEY ("id");
 
 
 
@@ -1629,8 +2428,28 @@ ALTER TABLE ONLY "public"."chat_hub_sessions"
 
 
 
+ALTER TABLE ONLY "public"."agent_task_snapshot"
+    ADD CONSTRAINT "PK_2142a8bcda2360c3c5e34f82640" PRIMARY KEY ("versionId", "taskId");
+
+
+
 ALTER TABLE ONLY "public"."instance_ai_iteration_logs"
     ADD CONSTRAINT "PK_21c2b214b44bc6c34a6d3551c90" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agent_execution_threads"
+    ADD CONSTRAINT "PK_22373dbf6ba6929d8ac50093309" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_pending_confirmations"
+    ADD CONSTRAINT "PK_25c38179c8d45095b168adfff80" PRIMARY KEY ("requestId");
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_sources"
+    ADD CONSTRAINT "PK_278f05e98e74baaaa93f52b4bab" PRIMARY KEY ("id");
 
 
 
@@ -1659,8 +2478,23 @@ ALTER TABLE ONLY "public"."instance_ai_resources"
 
 
 
+ALTER TABLE ONLY "public"."agents_threads"
+    ADD CONSTRAINT "PK_4a3feb0a13ffe315c009cce64e5" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."project"
     ADD CONSTRAINT "PK_4d68b1358bb5b766d3e78f32f57" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_observations"
+    ADD CONSTRAINT "PK_4d9b514cdf0f0b577650caf2ac2" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agent_checkpoints"
+    ADD CONSTRAINT "PK_50a27cbafa6806c9b162304b5fd" PRIMARY KEY ("runId");
 
 
 
@@ -1674,8 +2508,23 @@ ALTER TABLE ONLY "public"."workflow_dependency"
 
 
 
+ALTER TABLE ONLY "public"."instance_ai_checkpoints"
+    ADD CONSTRAINT "PK_5315a45f0846d1f9d128c18a2ed" PRIMARY KEY ("key");
+
+
+
 ALTER TABLE ONLY "public"."invalid_auth_token"
     ADD CONSTRAINT "PK_5779069b7235b256d91f7af1a15" PRIMARY KEY ("token");
+
+
+
+ALTER TABLE ONLY "public"."evaluation_config"
+    ADD CONSTRAINT "PK_59c14dccf8989df94070c2dcfda" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_observation_cursors"
+    ADD CONSTRAINT "PK_5b6319b2e9a37c1064a72428f9a" PRIMARY KEY ("observationScopeId");
 
 
 
@@ -1694,8 +2543,18 @@ ALTER TABLE ONLY "public"."folder"
 
 
 
+ALTER TABLE ONLY "public"."agent_history"
+    ADD CONSTRAINT "PK_65ffcfe7a8e112fb826311fb092" PRIMARY KEY ("versionId");
+
+
+
 ALTER TABLE ONLY "public"."data_table_column"
     ADD CONSTRAINT "PK_673cb121ee4a8a5e27850c72c51" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agent_files"
+    ADD CONSTRAINT "PK_692920e59217af7d124cd95106f" PRIMARY KEY ("id");
 
 
 
@@ -1739,8 +2598,18 @@ ALTER TABLE ONLY "public"."execution_annotations"
 
 
 
+ALTER TABLE ONLY "public"."agents_observation_locks"
+    ADD CONSTRAINT "PK_7e2e315162ac3d80587e15ac2c3" PRIMARY KEY ("agentId", "observationScopeId", "taskKind");
+
+
+
 ALTER TABLE ONLY "public"."credential_dependency"
     ADD CONSTRAINT "PK_80212729ed0ffa0709417ab28f4" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agents_messages"
+    ADD CONSTRAINT "PK_81020dc608dfb0af1ede386d907" PRIMARY KEY ("id");
 
 
 
@@ -1809,8 +2678,33 @@ ALTER TABLE ONLY "public"."trusted_key_source"
 
 
 
+ALTER TABLE ONLY "public"."agents_observations"
+    ADD CONSTRAINT "PK_9ad319654d12c2649f7caf27135" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agents"
+    ADD CONSTRAINT "PK_9c653f28ae19c5884d5baf6a1d9" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_locks"
+    ADD CONSTRAINT "PK_a8e0f570d04a174292bea104ae6" PRIMARY KEY ("agentId", "resourceId");
+
+
+
 ALTER TABLE ONLY "public"."webhook_entity"
     ADD CONSTRAINT "PK_b21ace2e13596ccd87dc9bf4ea6" PRIMARY KEY ("webhookPath", "method");
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_cursors"
+    ADD CONSTRAINT "PK_b31a1d5c009a27f4cc5ef8f102a" PRIMARY KEY ("agentId", "observationScopeId");
+
+
+
+ALTER TABLE ONLY "public"."workflow_publication_outbox"
+    ADD CONSTRAINT "PK_b3e2eeee36a4bd044d56468d311" PRIMARY KEY ("id");
 
 
 
@@ -1826,6 +2720,16 @@ ALTER TABLE ONLY "public"."workflow_history"
 
 ALTER TABLE ONLY "public"."dynamic_credential_resolver"
     ADD CONSTRAINT "PK_b76cfb088dcdaf5275e9980bb64" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agent_execution"
+    ADD CONSTRAINT "PK_ba438acc8532addc12d1ef17049" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entries"
+    ADD CONSTRAINT "PK_bfbc45dc88f66fae4e4b4a15fec" PRIMARY KEY ("id");
 
 
 
@@ -1889,8 +2793,18 @@ ALTER TABLE ONLY "public"."workflow_builder_session"
 
 
 
+ALTER TABLE ONLY "public"."evaluation_collection"
+    ADD CONSTRAINT "PK_e720b6efc1e45b878ebb0b2ca30" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."user"
     ADD CONSTRAINT "PK_ea8f538c94b6e352418254ed6474a81f" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."agents_observation_cursors"
+    ADD CONSTRAINT "PK_eb777ac57ab872d38f8ebd19317" PRIMARY KEY ("agentId", "observationScopeId");
 
 
 
@@ -1909,6 +2823,16 @@ ALTER TABLE ONLY "public"."insights_metadata"
 
 
 
+ALTER TABLE ONLY "public"."agent_task_run_lock"
+    ADD CONSTRAINT "PK_f593adaf7230e964d3c25deda64" PRIMARY KEY ("agentId", "taskId");
+
+
+
+ALTER TABLE ONLY "public"."agents_resources"
+    ADD CONSTRAINT "PK_fa6b20b2d31a9991529dbf8ef7d" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."oauth_authorization_codes"
     ADD CONSTRAINT "PK_fb91ab932cfbd694061501cc20f" PRIMARY KEY ("code");
 
@@ -1919,6 +2843,11 @@ ALTER TABLE ONLY "public"."binary_data"
 
 
 
+ALTER TABLE ONLY "public"."instance_ai_observation_locks"
+    ADD CONSTRAINT "PK_fc491dd378b9448655c3c683f85" PRIMARY KEY ("observationScopeId", "taskKind");
+
+
+
 ALTER TABLE ONLY "public"."role_scope"
     ADD CONSTRAINT "PK_role_scope" PRIMARY KEY ("roleSlug", "scopeSlug");
 
@@ -1926,6 +2855,11 @@ ALTER TABLE ONLY "public"."role_scope"
 
 ALTER TABLE ONLY "public"."oauth_user_consents"
     ADD CONSTRAINT "UQ_083721d99ce8db4033e2958ebb4" UNIQUE ("userId", "clientId");
+
+
+
+ALTER TABLE ONLY "public"."evaluation_config"
+    ADD CONSTRAINT "UQ_3c3c99a712e971835c52292e44c" UNIQUE ("workflowId", "name");
 
 
 
@@ -2018,7 +2952,43 @@ CREATE INDEX "IDX_02751202c9a2ad75f2d8e14f5e" ON "public"."instance_ai_iteration
 
 
 
+CREATE INDEX "IDX_0468a9dc35597314e641d4722a" ON "public"."agent_execution_threads" USING "btree" ("agentId");
+
+
+
+CREATE INDEX "IDX_069e791e428391a5569e7a96b2" ON "public"."agents_memory_entry_cursors" USING "btree" ("observationScopeId");
+
+
+
 CREATE INDEX "IDX_070b5de842ece9ccdda0d9738b" ON "public"."workflow_publish_history" USING "btree" ("workflowId", "versionId");
+
+
+
+CREATE INDEX "IDX_07cb1e4a302629c5fa5d74d2bb" ON "public"."agents_observations" USING "btree" ("agentId", "observationScopeId", "status");
+
+
+
+CREATE INDEX "IDX_0babdf6e3b897a86fe4678355e" ON "public"."instance_ai_pending_confirmations" USING "btree" ("checkpointKey");
+
+
+
+CREATE INDEX "IDX_0d5db648188d338df7fb2a8064" ON "public"."instance_ai_observations" USING "btree" ("observationScopeId", "status", "createdAt", "id");
+
+
+
+CREATE INDEX "IDX_0e2f8bf92a7a9c88b89670f701" ON "public"."agent_execution_threads" USING "btree" ("projectId");
+
+
+
+CREATE INDEX "IDX_0edf1226b77ddc525eae493807" ON "public"."agents_memory_entries" USING "btree" ("supersededBy");
+
+
+
+CREATE INDEX "IDX_127ee1078ffa952bb37b511efa" ON "public"."agents_observations" USING "btree" ("supersededBy");
+
+
+
+CREATE INDEX "IDX_1443a75e59adbfb796071d6639" ON "public"."agents_memory_entries" USING "btree" ("resourceId");
 
 
 
@@ -2050,6 +3020,10 @@ CREATE UNIQUE INDEX "IDX_1ef35bac35d20bdae979d917a3" ON "public"."user_api_keys"
 
 
 
+CREATE INDEX "IDX_2b23f3f24a70bebb990203b011" ON "public"."instance_ai_checkpoints" USING "btree" ("threadId");
+
+
+
 CREATE INDEX "IDX_35a78869286c65d9330d02b88f" ON "public"."role_mapping_rule_project" USING "btree" ("projectId");
 
 
@@ -2058,11 +3032,35 @@ CREATE INDEX "IDX_39b07732e819fb561d74c38763" ON "public"."ai_builder_temporary_
 
 
 
+CREATE INDEX "IDX_451d387a182fa8dd8002dfc3a7" ON "public"."agents_memory_entry_sources" USING "btree" ("threadId");
+
+
+
+CREATE INDEX "IDX_45dafc48fe2ce95eac30fc8ffd" ON "public"."agent_files" USING "btree" ("agentId", "createdAt");
+
+
+
 CREATE UNIQUE INDEX "IDX_4c72ebdb265d1775bf61147af0" ON "public"."chat_hub_tools" USING "btree" ("ownerId", "name");
 
 
 
+CREATE INDEX "IDX_4cfd8a70ebb0a5b0cf047dca3c" ON "public"."agents_observations" USING "btree" ("observationScopeId");
+
+
+
+CREATE INDEX "IDX_501e2d1701a10e24fb69ab5fc5" ON "public"."agents_observations" USING "btree" ("parentId");
+
+
+
+CREATE INDEX "IDX_54fa1b94f34a409beafae567a4" ON "public"."agents_threads" USING "btree" ("resourceId");
+
+
+
 CREATE INDEX "IDX_56900edc3cfd16612e2ef2c6a8" ON "public"."binary_data" USING "btree" ("sourceType", "sourceId");
+
+
+
+CREATE INDEX "IDX_5e31c210f896d539964bf99fe3" ON "public"."agent_checkpoints" USING "btree" ("agentId");
 
 
 
@@ -2086,7 +3084,15 @@ CREATE INDEX "IDX_62476b94b56d9dc7ed9ed75d3d" ON "public"."dynamic_credential_en
 
 
 
+CREATE INDEX "IDX_63d3c3a68b9cebf05f967f0b1c" ON "public"."agent_execution" USING "btree" ("threadId", "createdAt");
+
+
+
 CREATE UNIQUE INDEX "IDX_63d7bbae72c767cf162d459fcc" ON "public"."user_api_keys" USING "btree" ("userId", "label");
+
+
+
+CREATE INDEX "IDX_6b55089892e447c2f82e5ec60e" ON "public"."agents_observation_locks" USING "btree" ("observationScopeId");
 
 
 
@@ -2094,7 +3100,19 @@ CREATE INDEX "IDX_6edec973a6450990977bb854c3" ON "public"."dynamic_credential_us
 
 
 
+CREATE INDEX "IDX_768189b506cc26c4fe878b87cb" ON "public"."instance_ai_checkpoints" USING "btree" ("runId");
+
+
+
 CREATE INDEX "IDX_76e212c6867fbaa06bf0decd6f" ON "public"."instance_ai_messages" USING "btree" ("resourceId");
+
+
+
+CREATE INDEX "IDX_87aa187d27ea67eafd16490515" ON "public"."agents_observation_cursors" USING "btree" ("observationScopeId");
+
+
+
+CREATE INDEX "IDX_87cd5a8da20304b089ea2f83fe" ON "public"."agent_history" USING "btree" ("agentId");
 
 
 
@@ -2110,6 +3128,10 @@ CREATE INDEX "IDX_92f13cb6bc694227e069447f7b" ON "public"."instance_ai_observati
 
 
 
+CREATE INDEX "IDX_9594c0983cfee1c8ff49b05848" ON "public"."agents_memory_entry_locks" USING "btree" ("resourceId");
+
+
+
 CREATE UNIQUE INDEX "IDX_97f863fa83c4786f1956508496" ON "public"."execution_annotations" USING "btree" ("executionId");
 
 
@@ -2119,6 +3141,18 @@ CREATE INDEX "IDX_9c9ee9df586e60bb723234e499" ON "public"."dynamic_credential_re
 
 
 CREATE UNIQUE INDEX "IDX_UniqueRoleDisplayName" ON "public"."role" USING "btree" ("displayName");
+
+
+
+CREATE UNIQUE INDEX "IDX_a03e04e94bea8439dd166d4b52" ON "public"."agents_memory_entries" USING "btree" ("agentId", "resourceId", "contentHash");
+
+
+
+CREATE INDEX "IDX_a30d560207c4071d98aa03c179" ON "public"."agents" USING "btree" ("projectId");
+
+
+
+CREATE UNIQUE INDEX "IDX_a353ac251315ef0af6ad3c9f0a" ON "public"."agents_memory_entry_sources" USING "btree" ("memoryEntryId", "observationId", "evidenceHash");
 
 
 
@@ -2134,6 +3168,10 @@ CREATE INDEX "IDX_a371ee6b8e0ebb5635f8baa46d" ON "public"."instance_ai_workflow_
 
 
 
+CREATE INDEX "IDX_a48ce930c3bc7604894b8f0eaa" ON "public"."evaluation_collection" USING "btree" ("workflowId");
+
+
+
 CREATE INDEX "IDX_a4ff2d9b9628ea988fa9e7d0bf" ON "public"."workflow_dependency" USING "btree" ("workflowId");
 
 
@@ -2142,7 +3180,31 @@ CREATE UNIQUE INDEX "IDX_a680ac96aae02dc887bbaac512" ON "public"."instance_ai_ob
 
 
 
+CREATE INDEX "IDX_a80e0ee839a2f10ba4b86e1999" ON "public"."instance_ai_observations" USING "btree" ("supersededBy");
+
+
+
 CREATE UNIQUE INDEX "IDX_ae51b54c4bb430cf92f48b623f" ON "public"."annotation_tag_entity" USING "btree" ("name");
+
+
+
+CREATE INDEX "IDX_aff2807b31eccbafe59d0474f0" ON "public"."agents_memory_entries" USING "btree" ("agentId", "resourceId", "status", "createdAt", "id");
+
+
+
+CREATE INDEX "IDX_agent_execution_threads_taskVersionId" ON "public"."agent_execution_threads" USING "btree" ("taskVersionId");
+
+
+
+CREATE INDEX "IDX_agents_messages_threadId_createdAt" ON "public"."agents_messages" USING "btree" ("threadId", "createdAt");
+
+
+
+CREATE INDEX "IDX_agents_projectId" ON "public"."agents" USING "btree" ("projectId");
+
+
+
+CREATE INDEX "IDX_ba67ee8dc311830a2eea89b6e9" ON "public"."instance_ai_pending_confirmations" USING "btree" ("threadId");
 
 
 
@@ -2150,7 +3212,15 @@ CREATE INDEX "IDX_bb66e404c35996b0d694617750" ON "public"."role_mapping_rule" US
 
 
 
+CREATE INDEX "IDX_be9d0eca0b19fb93d4eb74b327" ON "public"."instance_ai_checkpoints" USING "btree" ("resourceId");
+
+
+
 CREATE INDEX "IDX_c1519757391996eb06064f0e7c" ON "public"."execution_annotation_tags" USING "btree" ("annotationId");
+
+
+
+CREATE INDEX "IDX_cb7c15d22fd068a0806aa57fc0" ON "public"."agents_memory_entry_sources" USING "btree" ("observationId");
 
 
 
@@ -2178,11 +3248,23 @@ CREATE INDEX "IDX_d61a12235d268a49af6a3c09c1" ON "public"."dynamic_credential_en
 
 
 
+CREATE INDEX "IDX_d634a0c93fd7de68a87eab951b" ON "public"."evaluation_collection" USING "btree" ("evaluationConfigId");
+
+
+
 CREATE INDEX "IDX_d6870d3b6e4c185d33926f423c" ON "public"."test_run" USING "btree" ("workflowId");
 
 
 
+CREATE INDEX "IDX_d7a4aba7440449865e2b924377" ON "public"."instance_ai_pending_confirmations" USING "btree" ("expiresAt");
+
+
+
 CREATE INDEX "IDX_d926c16c2ad9728cb9a81790c0" ON "public"."instance_ai_run_snapshots" USING "btree" ("threadId", "messageGroupId");
+
+
+
+CREATE INDEX "IDX_daef2195a4a846eb70eed15e03" ON "public"."instance_ai_observations" USING "btree" ("parentId");
 
 
 
@@ -2210,6 +3292,10 @@ CREATE UNIQUE INDEX "IDX_deployment_key_signing_jwt_active" ON "public"."deploym
 
 
 
+CREATE INDEX "IDX_df5fd25c8bbfd2b042602600d8" ON "public"."instance_ai_pending_confirmations" USING "btree" ("userId");
+
+
+
 CREATE INDEX "IDX_e48a201071ab85d9d09119d640" ON "public"."workflow_dependency" USING "btree" ("dependencyKey");
 
 
@@ -2230,6 +3316,26 @@ CREATE INDEX "IDX_f36dea4d38fe92e0e8f44d5a56" ON "public"."instance_ai_threads" 
 
 
 
+CREATE INDEX "IDX_f45d0535a2ed59b6c2dd6da98a" ON "public"."agent_task_definition" USING "btree" ("agentId");
+
+
+
+CREATE INDEX "IDX_f9573af4ed653f13b0ba1f7b12" ON "public"."agents_memory_entry_sources" USING "btree" ("agentId", "threadId");
+
+
+
+CREATE INDEX "IDX_fc7bf858660bfafd19181e8e35" ON "public"."agents_messages" USING "btree" ("threadId", "createdAt");
+
+
+
+CREATE INDEX "IDX_fd7542bb123074760285dc1bbf" ON "public"."evaluation_config" USING "btree" ("workflowId");
+
+
+
+CREATE INDEX "IDX_insights_raw_timestamp_id" ON "public"."insights_raw" USING "btree" ("timestamp", "id");
+
+
+
 CREATE INDEX "IDX_role_scope_scopeSlug" ON "public"."role_scope" USING "btree" ("scopeSlug");
 
 
@@ -2238,11 +3344,31 @@ CREATE UNIQUE INDEX "IDX_secrets_provider_connection_providerKey" ON "public"."s
 
 
 
+CREATE INDEX "IDX_shared_workflow_projectId" ON "public"."shared_workflow" USING "btree" ("projectId");
+
+
+
+CREATE INDEX "IDX_test_run_collectionId" ON "public"."test_run" USING "btree" ("collectionId");
+
+
+
+CREATE INDEX "IDX_test_run_evaluationConfigId" ON "public"."test_run" USING "btree" ("evaluationConfigId");
+
+
+
 CREATE INDEX "IDX_workflow_dependency_publishedVersionId" ON "public"."workflow_dependency" USING "btree" ("publishedVersionId");
 
 
 
 CREATE INDEX "IDX_workflow_entity_name" ON "public"."workflow_entity" USING "btree" ("name");
+
+
+
+CREATE INDEX "IDX_workflow_entity_sourceWorkflowId" ON "public"."workflow_entity" USING "btree" ("sourceWorkflowId") WHERE ("sourceWorkflowId" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "IDX_workflow_publication_outbox_pending_workflow" ON "public"."workflow_publication_outbox" USING "btree" ("workflowId") WHERE (("status")::"text" = 'pending'::"text");
 
 
 
@@ -2319,6 +3445,16 @@ ALTER TABLE ONLY "public"."workflow_builder_session"
 
 
 
+ALTER TABLE ONLY "public"."agent_execution_threads"
+    ADD CONSTRAINT "FK_0468a9dc35597314e641d4722aa" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_cursors"
+    ADD CONSTRAINT "FK_069e791e428391a5569e7a96b20" FOREIGN KEY ("observationScopeId") REFERENCES "agents_threads"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."processed_data"
     ADD CONSTRAINT "FK_06a69a7032c97a763c2c7599464" FOREIGN KEY ("workflowId") REFERENCES "workflow_entity"("id") ON DELETE CASCADE;
 
@@ -2329,8 +3465,58 @@ ALTER TABLE ONLY "public"."workflow_entity"
 
 
 
+ALTER TABLE ONLY "public"."agents_observation_locks"
+    ADD CONSTRAINT "FK_093e44ae20f2518e97d83a95433" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_messages"
+    ADD CONSTRAINT "FK_0a8057a61afabd2999608ffd0d9" FOREIGN KEY ("threadId") REFERENCES "agents_threads"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_pending_confirmations"
+    ADD CONSTRAINT "FK_0babdf6e3b897a86fe4678355eb" FOREIGN KEY ("checkpointKey") REFERENCES "instance_ai_checkpoints"("key") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_locks"
+    ADD CONSTRAINT "FK_0ccf6d9ea6f44fa1c264fc2f795" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agent_execution_threads"
+    ADD CONSTRAINT "FK_0e2f8bf92a7a9c88b89670f701c" FOREIGN KEY ("projectId") REFERENCES "project"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entries"
+    ADD CONSTRAINT "FK_0edf1226b77ddc525eae4938079" FOREIGN KEY ("supersededBy") REFERENCES "agents_memory_entries"("id");
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_observation_locks"
+    ADD CONSTRAINT "FK_103e2e5f454860b28ea05a82c74" FOREIGN KEY ("observationScopeId") REFERENCES "instance_ai_threads"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_observations"
+    ADD CONSTRAINT "FK_127ee1078ffa952bb37b511efad" FOREIGN KEY ("supersededBy") REFERENCES "agents_observations"("id");
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entries"
+    ADD CONSTRAINT "FK_1443a75e59adbfb796071d66393" FOREIGN KEY ("resourceId") REFERENCES "agents_resources"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."project_secrets_provider_access"
     ADD CONSTRAINT "FK_18e5c27d2524b1638b292904e48" FOREIGN KEY ("secretsProviderConnectionId") REFERENCES "secrets_provider_connection"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agent_task_snapshot"
+    ADD CONSTRAINT "FK_1acedce6690392ef1611cca8b88" FOREIGN KEY ("versionId") REFERENCES "agent_history"("versionId") ON DELETE CASCADE;
 
 
 
@@ -2371,6 +3557,16 @@ ALTER TABLE ONLY "public"."insights_metadata"
 
 ALTER TABLE ONLY "public"."chat_hub_messages"
     ADD CONSTRAINT "FK_25c9736e7f769f3a005eef4b372" FOREIGN KEY ("retryOfMessageId") REFERENCES "chat_hub_messages"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entries"
+    ADD CONSTRAINT "FK_28e981fb675e9b44ce02f0ec1dd" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_checkpoints"
+    ADD CONSTRAINT "FK_2b23f3f24a70bebb990203b011e" FOREIGN KEY ("threadId") REFERENCES "instance_ai_threads"("id") ON DELETE CASCADE;
 
 
 
@@ -2424,8 +3620,38 @@ ALTER TABLE ONLY "public"."chat_hub_agents"
 
 
 
+ALTER TABLE ONLY "public"."agents_memory_entry_sources"
+    ADD CONSTRAINT "FK_451d387a182fa8dd8002dfc3a77" FOREIGN KEY ("threadId") REFERENCES "agents_threads"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_sources"
+    ADD CONSTRAINT "FK_4706f6223313959b7437a2b48df" FOREIGN KEY ("memoryEntryId") REFERENCES "agents_memory_entries"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_observations"
+    ADD CONSTRAINT "FK_4cfd8a70ebb0a5b0cf047dca3cf" FOREIGN KEY ("observationScopeId") REFERENCES "agents_threads"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_observations"
+    ADD CONSTRAINT "FK_501e2d1701a10e24fb69ab5fc5f" FOREIGN KEY ("parentId") REFERENCES "agents_observations"("id");
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_observation_cursors"
+    ADD CONSTRAINT "FK_5b6319b2e9a37c1064a72428f9a" FOREIGN KEY ("observationScopeId") REFERENCES "instance_ai_threads"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."workflow_published_version"
     ADD CONSTRAINT "FK_5c76fb7ee939fe2530374d3f75a" FOREIGN KEY ("workflowId") REFERENCES "workflow_entity"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."agent_checkpoints"
+    ADD CONSTRAINT "FK_5e31c210f896d539964bf99fe32" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
 
 
 
@@ -2454,6 +3680,11 @@ ALTER TABLE ONLY "public"."oauth_authorization_codes"
 
 
 
+ALTER TABLE ONLY "public"."agents_observation_cursors"
+    ADD CONSTRAINT "FK_64e92819f4b413661ed6e2c3c3d" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."chat_hub_session_tools"
     ADD CONSTRAINT "FK_6596a328affd8d4967ffb303eee" FOREIGN KEY ("toolId") REFERENCES "chat_hub_tools"("id") ON DELETE CASCADE;
 
@@ -2461,6 +3692,11 @@ ALTER TABLE ONLY "public"."chat_hub_session_tools"
 
 ALTER TABLE ONLY "public"."chat_hub_messages"
     ADD CONSTRAINT "FK_6afb260449dd7a9b85355d4e0c9" FOREIGN KEY ("executionId") REFERENCES "execution_entity"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."agents_observation_locks"
+    ADD CONSTRAINT "FK_6b55089892e447c2f82e5ec60ed" FOREIGN KEY ("observationScopeId") REFERENCES "agents_threads"("id") ON DELETE CASCADE;
 
 
 
@@ -2486,6 +3722,11 @@ ALTER TABLE ONLY "public"."oauth_access_tokens"
 
 ALTER TABLE ONLY "public"."installed_nodes"
     ADD CONSTRAINT "FK_73f857fc5dce682cef8a99c11dbddbc969618951" FOREIGN KEY ("package") REFERENCES "installed_packages"("packageName") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_cursors"
+    ADD CONSTRAINT "FK_746780fd115e5e4352457a3c617" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
 
 
 
@@ -2519,6 +3760,21 @@ ALTER TABLE ONLY "public"."ai_builder_temporary_workflow"
 
 
 
+ALTER TABLE ONLY "public"."agent_history"
+    ADD CONSTRAINT "FK_8771675f44c58fb40e0feb9ee35" FOREIGN KEY ("publishedById") REFERENCES "user"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."agents_observation_cursors"
+    ADD CONSTRAINT "FK_87aa187d27ea67eafd164905154" FOREIGN KEY ("observationScopeId") REFERENCES "agents_threads"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agent_history"
+    ADD CONSTRAINT "FK_87cd5a8da20304b089ea2f83fec" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."instance_ai_iteration_logs"
     ADD CONSTRAINT "FK_8bfcc6c51fd3d69b1eae8aebd49" FOREIGN KEY ("threadId") REFERENCES "instance_ai_threads"("id") ON DELETE CASCADE;
 
@@ -2539,6 +3795,11 @@ ALTER TABLE ONLY "public"."data_table_column"
 
 
 
+ALTER TABLE ONLY "public"."agents"
+    ADD CONSTRAINT "FK_940597dfe9753375309ce6aeea0" FOREIGN KEY ("activeVersionId") REFERENCES "agent_history"("versionId") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."dynamic_credential_user_entry"
     ADD CONSTRAINT "FK_945ba70b342a066d1306b12ccd2" FOREIGN KEY ("credentialId") REFERENCES "credentials_entity"("id") ON DELETE CASCADE;
 
@@ -2546,6 +3807,11 @@ ALTER TABLE ONLY "public"."dynamic_credential_user_entry"
 
 ALTER TABLE ONLY "public"."folder_tag"
     ADD CONSTRAINT "FK_94a60854e06f2897b2e0d39edba" FOREIGN KEY ("folderId") REFERENCES "folder"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_locks"
+    ADD CONSTRAINT "FK_9594c0983cfee1c8ff49b05848b" FOREIGN KEY ("resourceId") REFERENCES "agents_resources"("id") ON DELETE CASCADE;
 
 
 
@@ -2564,6 +3830,11 @@ ALTER TABLE ONLY "public"."chat_hub_sessions"
 
 
 
+ALTER TABLE ONLY "public"."agents"
+    ADD CONSTRAINT "FK_a30d560207c4071d98aa03c179c" FOREIGN KEY ("projectId") REFERENCES "project"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."execution_annotation_tags"
     ADD CONSTRAINT "FK_a3697779b366e131b2bbdae2976" FOREIGN KEY ("tagId") REFERENCES "annotation_tag_entity"("id") ON DELETE CASCADE;
 
@@ -2576,6 +3847,11 @@ ALTER TABLE ONLY "public"."dynamic_credential_user_entry"
 
 ALTER TABLE ONLY "public"."shared_workflow"
     ADD CONSTRAINT "FK_a45ea5f27bcfdc21af9b4188560" FOREIGN KEY ("projectId") REFERENCES "project"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."evaluation_collection"
+    ADD CONSTRAINT "FK_a48ce930c3bc7604894b8f0eaad" FOREIGN KEY ("workflowId") REFERENCES "workflow_entity"("id") ON DELETE CASCADE;
 
 
 
@@ -2599,6 +3875,11 @@ ALTER TABLE ONLY "public"."dynamic_credential_entry"
 
 
 
+ALTER TABLE ONLY "public"."instance_ai_observations"
+    ADD CONSTRAINT "FK_a80e0ee839a2f10ba4b86e19998" FOREIGN KEY ("supersededBy") REFERENCES "instance_ai_observations"("id");
+
+
+
 ALTER TABLE ONLY "public"."folder"
     ADD CONSTRAINT "FK_a8260b0b36939c6247f385b8221" FOREIGN KEY ("projectId") REFERENCES "project"("id") ON DELETE CASCADE;
 
@@ -2609,8 +3890,18 @@ ALTER TABLE ONLY "public"."oauth_authorization_codes"
 
 
 
+ALTER TABLE ONLY "public"."agent_files"
+    ADD CONSTRAINT "FK_aca4514cb500494b64356c2e164" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."chat_hub_messages"
     ADD CONSTRAINT "FK_acf8926098f063cdbbad8497fd1" FOREIGN KEY ("workflowId") REFERENCES "workflow_entity"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."agent_execution"
+    ADD CONSTRAINT "FK_add2432fb6034cc18b6af299dce" FOREIGN KEY ("threadId") REFERENCES "agent_execution_threads"("id") ON DELETE CASCADE;
 
 
 
@@ -2624,8 +3915,18 @@ ALTER TABLE ONLY "public"."workflow_publish_history"
 
 
 
+ALTER TABLE ONLY "public"."agent_task_run_lock"
+    ADD CONSTRAINT "FK_b57a2862ae869aab24e54cefd48" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."chat_hub_tools"
     ADD CONSTRAINT "FK_b8030b47af9213f1fd15450fb7f" FOREIGN KEY ("ownerId") REFERENCES "user"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_pending_confirmations"
+    ADD CONSTRAINT "FK_ba67ee8dc311830a2eea89b6e96" FOREIGN KEY ("threadId") REFERENCES "instance_ai_threads"("id") ON DELETE CASCADE;
 
 
 
@@ -2654,8 +3955,18 @@ ALTER TABLE ONLY "public"."data_table"
 
 
 
+ALTER TABLE ONLY "public"."agents_memory_entry_sources"
+    ADD CONSTRAINT "FK_c38e8a57a36b880e39a52ada2e8" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."project_relation"
     ADD CONSTRAINT "FK_c6b99592dc96b0d836d7a21db91" FOREIGN KEY ("role") REFERENCES "role"("slug");
+
+
+
+ALTER TABLE ONLY "public"."agents_memory_entry_sources"
+    ADD CONSTRAINT "FK_cb7c15d22fd068a0806aa57fc03" FOREIGN KEY ("observationId") REFERENCES "agents_observations"("id") ON DELETE CASCADE;
 
 
 
@@ -2669,8 +3980,23 @@ ALTER TABLE ONLY "public"."chat_hub_sessions"
 
 
 
+ALTER TABLE ONLY "public"."agents_observations"
+    ADD CONSTRAINT "FK_d206432be97b7ed88d187479b1b" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_observations"
+    ADD CONSTRAINT "FK_d54fc84a6c8ac91b5e0db0378a4" FOREIGN KEY ("observationScopeId") REFERENCES "instance_ai_threads"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."dynamic_credential_entry"
     ADD CONSTRAINT "FK_d61a12235d268a49af6a3c09c13" FOREIGN KEY ("resolver_id") REFERENCES "dynamic_credential_resolver"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."evaluation_collection"
+    ADD CONSTRAINT "FK_d634a0c93fd7de68a87eab951b2" FOREIGN KEY ("evaluationConfigId") REFERENCES "evaluation_config"("id") ON DELETE CASCADE;
 
 
 
@@ -2681,6 +4007,11 @@ ALTER TABLE ONLY "public"."test_run"
 
 ALTER TABLE ONLY "public"."shared_workflow"
     ADD CONSTRAINT "FK_daa206a04983d47d0a9c34649ce" FOREIGN KEY ("workflowId") REFERENCES "workflow_entity"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_observations"
+    ADD CONSTRAINT "FK_daef2195a4a846eb70eed15e039" FOREIGN KEY ("parentId") REFERENCES "instance_ai_observations"("id");
 
 
 
@@ -2696,6 +4027,11 @@ ALTER TABLE ONLY "public"."role_mapping_rule_project"
 
 ALTER TABLE ONLY "public"."workflow_published_version"
     ADD CONSTRAINT "FK_df3428a541b802d6a63ac56e330" FOREIGN KEY ("publishedVersionId") REFERENCES "workflow_history"("versionId") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."instance_ai_pending_confirmations"
+    ADD CONSTRAINT "FK_df5fd25c8bbfd2b042602600d8e" FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE CASCADE;
 
 
 
@@ -2734,6 +4070,26 @@ ALTER TABLE ONLY "public"."user"
 
 
 
+ALTER TABLE ONLY "public"."agent_execution_threads"
+    ADD CONSTRAINT "FK_f00b52d74fe11838e1fe086deea" FOREIGN KEY ("taskVersionId") REFERENCES "agent_history"("versionId") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."evaluation_collection"
+    ADD CONSTRAINT "FK_f4561f38b5a22a4f090d5cd3eae" FOREIGN KEY ("createdById") REFERENCES "user"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."agent_task_definition"
+    ADD CONSTRAINT "FK_f45d0535a2ed59b6c2dd6da98a0" FOREIGN KEY ("agentId") REFERENCES "agents"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."evaluation_config"
+    ADD CONSTRAINT "FK_fd7542bb123074760285dc1bbf3" FOREIGN KEY ("workflowId") REFERENCES "workflow_entity"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."role_scope"
     ADD CONSTRAINT "FK_role" FOREIGN KEY ("roleSlug") REFERENCES "role"("slug") ON UPDATE CASCADE ON DELETE CASCADE;
 
@@ -2741,6 +4097,16 @@ ALTER TABLE ONLY "public"."role_scope"
 
 ALTER TABLE ONLY "public"."role_scope"
     ADD CONSTRAINT "FK_scope" FOREIGN KEY ("scopeSlug") REFERENCES "scope"("slug") ON UPDATE CASCADE ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."test_run"
+    ADD CONSTRAINT "FK_test_run_collection_id" FOREIGN KEY ("collectionId") REFERENCES "evaluation_collection"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."test_run"
+    ADD CONSTRAINT "FK_test_run_evaluation_config_id" FOREIGN KEY ("evaluationConfigId") REFERENCES "evaluation_config"("id") ON DELETE SET NULL;
 
 
 
@@ -2969,6 +4335,120 @@ GRANT ALL ON FUNCTION "public"."increment_workflow_version"() TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."agent_checkpoints" TO "anon";
+GRANT ALL ON TABLE "public"."agent_checkpoints" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_checkpoints" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agent_execution" TO "anon";
+GRANT ALL ON TABLE "public"."agent_execution" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_execution" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agent_execution_threads" TO "anon";
+GRANT ALL ON TABLE "public"."agent_execution_threads" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_execution_threads" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agent_files" TO "anon";
+GRANT ALL ON TABLE "public"."agent_files" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_files" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agent_history" TO "anon";
+GRANT ALL ON TABLE "public"."agent_history" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_history" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agent_task_definition" TO "anon";
+GRANT ALL ON TABLE "public"."agent_task_definition" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_task_definition" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agent_task_run_lock" TO "anon";
+GRANT ALL ON TABLE "public"."agent_task_run_lock" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_task_run_lock" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agent_task_snapshot" TO "anon";
+GRANT ALL ON TABLE "public"."agent_task_snapshot" TO "authenticated";
+GRANT ALL ON TABLE "public"."agent_task_snapshot" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents" TO "anon";
+GRANT ALL ON TABLE "public"."agents" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_memory_entries" TO "anon";
+GRANT ALL ON TABLE "public"."agents_memory_entries" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_memory_entries" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_memory_entry_cursors" TO "anon";
+GRANT ALL ON TABLE "public"."agents_memory_entry_cursors" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_memory_entry_cursors" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_memory_entry_locks" TO "anon";
+GRANT ALL ON TABLE "public"."agents_memory_entry_locks" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_memory_entry_locks" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_memory_entry_sources" TO "anon";
+GRANT ALL ON TABLE "public"."agents_memory_entry_sources" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_memory_entry_sources" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_messages" TO "anon";
+GRANT ALL ON TABLE "public"."agents_messages" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_messages" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_observation_cursors" TO "anon";
+GRANT ALL ON TABLE "public"."agents_observation_cursors" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_observation_cursors" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_observation_locks" TO "anon";
+GRANT ALL ON TABLE "public"."agents_observation_locks" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_observation_locks" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_observations" TO "anon";
+GRANT ALL ON TABLE "public"."agents_observations" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_observations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_resources" TO "anon";
+GRANT ALL ON TABLE "public"."agents_resources" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_resources" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."agents_threads" TO "anon";
+GRANT ALL ON TABLE "public"."agents_threads" TO "authenticated";
+GRANT ALL ON TABLE "public"."agents_threads" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."ai_builder_temporary_workflow" TO "anon";
 GRANT ALL ON TABLE "public"."ai_builder_temporary_workflow" TO "authenticated";
 GRANT ALL ON TABLE "public"."ai_builder_temporary_workflow" TO "service_role";
@@ -3095,6 +4575,18 @@ GRANT ALL ON TABLE "public"."dynamic_credential_user_entry" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."evaluation_collection" TO "anon";
+GRANT ALL ON TABLE "public"."evaluation_collection" TO "authenticated";
+GRANT ALL ON TABLE "public"."evaluation_collection" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."evaluation_config" TO "anon";
+GRANT ALL ON TABLE "public"."evaluation_config" TO "authenticated";
+GRANT ALL ON TABLE "public"."evaluation_config" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."event_destinations" TO "anon";
 GRANT ALL ON TABLE "public"."event_destinations" TO "authenticated";
 GRANT ALL ON TABLE "public"."event_destinations" TO "service_role";
@@ -3209,6 +4701,12 @@ GRANT ALL ON TABLE "public"."installed_packages" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."instance_ai_checkpoints" TO "anon";
+GRANT ALL ON TABLE "public"."instance_ai_checkpoints" TO "authenticated";
+GRANT ALL ON TABLE "public"."instance_ai_checkpoints" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."instance_ai_iteration_logs" TO "anon";
 GRANT ALL ON TABLE "public"."instance_ai_iteration_logs" TO "authenticated";
 GRANT ALL ON TABLE "public"."instance_ai_iteration_logs" TO "service_role";
@@ -3221,9 +4719,33 @@ GRANT ALL ON TABLE "public"."instance_ai_messages" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."instance_ai_observation_cursors" TO "anon";
+GRANT ALL ON TABLE "public"."instance_ai_observation_cursors" TO "authenticated";
+GRANT ALL ON TABLE "public"."instance_ai_observation_cursors" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."instance_ai_observation_locks" TO "anon";
+GRANT ALL ON TABLE "public"."instance_ai_observation_locks" TO "authenticated";
+GRANT ALL ON TABLE "public"."instance_ai_observation_locks" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."instance_ai_observational_memory" TO "anon";
 GRANT ALL ON TABLE "public"."instance_ai_observational_memory" TO "authenticated";
 GRANT ALL ON TABLE "public"."instance_ai_observational_memory" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."instance_ai_observations" TO "anon";
+GRANT ALL ON TABLE "public"."instance_ai_observations" TO "authenticated";
+GRANT ALL ON TABLE "public"."instance_ai_observations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."instance_ai_pending_confirmations" TO "anon";
+GRANT ALL ON TABLE "public"."instance_ai_pending_confirmations" TO "authenticated";
+GRANT ALL ON TABLE "public"."instance_ai_pending_confirmations" TO "service_role";
 
 
 
@@ -3266,6 +4788,12 @@ GRANT ALL ON SEQUENCE "public"."instance_version_history_id_seq" TO "service_rol
 GRANT ALL ON TABLE "public"."invalid_auth_token" TO "anon";
 GRANT ALL ON TABLE "public"."invalid_auth_token" TO "authenticated";
 GRANT ALL ON TABLE "public"."invalid_auth_token" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."mcp_registry_server" TO "anon";
+GRANT ALL ON TABLE "public"."mcp_registry_server" TO "authenticated";
+GRANT ALL ON TABLE "public"."mcp_registry_server" TO "service_role";
 
 
 
@@ -3500,6 +5028,18 @@ GRANT ALL ON TABLE "public"."workflow_entity" TO "service_role";
 GRANT ALL ON TABLE "public"."workflow_history" TO "anon";
 GRANT ALL ON TABLE "public"."workflow_history" TO "authenticated";
 GRANT ALL ON TABLE "public"."workflow_history" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."workflow_publication_outbox" TO "anon";
+GRANT ALL ON TABLE "public"."workflow_publication_outbox" TO "authenticated";
+GRANT ALL ON TABLE "public"."workflow_publication_outbox" TO "service_role";
+
+
+
+GRANT ALL ON SEQUENCE "public"."workflow_publication_outbox_id_seq" TO "anon";
+GRANT ALL ON SEQUENCE "public"."workflow_publication_outbox_id_seq" TO "authenticated";
+GRANT ALL ON SEQUENCE "public"."workflow_publication_outbox_id_seq" TO "service_role";
 
 
 
